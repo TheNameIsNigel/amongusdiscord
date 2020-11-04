@@ -1,6 +1,10 @@
 package game
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/nicksnyder/go-i18n/v2/i18n"
+)
 
 // Phase type
 type Phase int
@@ -38,9 +42,20 @@ var PhaseNames = map[Phase]PhaseNameString{
 	MENU:    "MENU",
 }
 
-// ToString for a phase
+var PhaseMessages = map[Phase]*i18n.Message{
+	LOBBY:   {ID: "state.phase.LOBBY", Other: "LOBBY"},
+	TASKS:   {ID: "state.phase.TASKS", Other: "TASKS"},
+	DISCUSS: {ID: "state.phase.DISCUSSION", Other: "DISCUSSION"},
+	MENU:    {ID: "state.phase.MENU", Other: "MENU"},
+}
+
+// ToString for a Phase
 func (phase *Phase) ToString() PhaseNameString {
 	return PhaseNames[*phase]
+}
+
+func (phase *Phase) ToLocale() *i18n.Message {
+	return PhaseMessages[*phase]
 }
 
 // Player struct
@@ -55,9 +70,9 @@ type Player struct {
 type Region int
 
 const (
-	NA Region = 0
-	AS Region = 1
-	EU Region = 2
+	NA Region = iota
+	AS
+	EU
 )
 
 type Lobby struct {

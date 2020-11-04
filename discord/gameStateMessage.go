@@ -1,74 +1,109 @@
 package discord
 
 import (
-	"github.com/bwmarrin/discordgo"
 	"sync"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
 )
 
+const DeferredEditSeconds = 1
+
 type GameStateMessage struct {
-	message *discordgo.Message
-	lock    sync.RWMutex
+	MessageID        string `json:"messageID"`
+	MessageChannelID string `json:"messageChannelID"`
+	MessageAuthorID  string `json:"messageAuthorID"`
+	LeaderID         string `json:"leaderID"`
 }
 
 func MakeGameStateMessage() GameStateMessage {
 	return GameStateMessage{
-		message: nil,
-		lock:    sync.RWMutex{},
+		MessageID:        "",
+		MessageChannelID: "",
+		LeaderID:         "",
 	}
 }
 
-func (gsm *GameStateMessage) Exists() bool {
-	gsm.lock.RLock()
-	defer gsm.lock.RUnlock()
-	return gsm.message != nil
+func (dgs *DiscordGameState) Exists() bool {
+	return dgs.GameStateMsg.MessageID != ""
 }
 
-func (gsm *GameStateMessage) AddReaction(s *discordgo.Session, emoji string) {
-	gsm.lock.Lock()
-	if gsm.message != nil {
-		addReaction(s, gsm.message.ChannelID, gsm.message.ID, emoji)
+func (dgs *DiscordGameState) AddReaction(s *discordgo.Session, emoji string) {
+	if dgs.GameStateMsg.MessageID != "" {
+		addReaction(s, dgs.GameStateMsg.MessageChannelID, dgs.GameStateMsg.MessageID, emoji)
 	}
-	gsm.lock.Unlock()
 }
 
-func (gsm *GameStateMessage) Delete(s *discordgo.Session) {
-	gsm.lock.Lock()
-	if gsm.message != nil {
-		go deleteMessage(s, gsm.message.ChannelID, gsm.message.ID)
-		gsm.message = nil
+func (dgs *DiscordGameState) RemoveAllReactions(s *discordgo.Session) {
+	if dgs.GameStateMsg.MessageID != "" {
+		removeAllReactions(s, dgs.GameStateMsg.MessageChannelID, dgs.GameStateMsg.MessageID)
 	}
-	gsm.lock.Unlock()
 }
 
-func (gsm *GameStateMessage) Edit(s *discordgo.Session, me *discordgo.MessageEmbed) {
-	gsm.lock.Lock()
-	if gsm.message != nil {
-		editMessageEmbed(s, gsm.message.ChannelID, gsm.message.ID, me)
+func (dgs *DiscordGameState) AddAllReactions(s *discordgo.Session, emojis []Emoji) {
+	for _, e := range emojis {
+		dgs.AddReaction(s, e.FormatForReaction())
 	}
-	gsm.lock.Unlock()
+	dgs.AddReaction(s, "❌")
 }
 
-func (gsm *GameStateMessage) CreateMessage(s *discordgo.Session, me *discordgo.MessageEmbed, channelID string) {
-	gsm.lock.Lock()
-	gsm.message = sendMessageEmbed(s, channelID, me)
-	gsm.lock.Unlock()
+func (dgs *DiscordGameState) DeleteGameStateMsg(s *discordgo.Session) {
+	if dgs.GameStateMsg.MessageID != "" {
+		go deleteMessage(s, dgs.GameStateMsg.MessageChannelID, dgs.GameStateMsg.MessageID)
+		dgs.GameStateMsg.MessageID = ""
+		dgs.GameStateMsg.MessageChannelID = ""
+	}
 }
 
-func (gsm *GameStateMessage) SameChannel(channelID string) bool {
-	gsm.lock.RLock()
-	defer gsm.lock.RUnlock()
-	if gsm.message != nil {
-		return gsm.message.ChannelID == channelID
+var DeferredEdits = make(map[string]*discordgo.MessageEmbed)
+var DeferredEditsLock = sync.Mutex{}
+
+func (dgs *DiscordGameState) Edit(s *discordgo.Session, me *discordgo.MessageEmbed) {
+	DeferredEditsLock.Lock()
+
+	//if it isn't found, then start the worker to wait to start it
+	if _, ok := DeferredEdits[dgs.GameStateMsg.MessageID]; !ok {
+		go deferredEditWorker(s, dgs.GameStateMsg.MessageChannelID, dgs.GameStateMsg.MessageID)
+	}
+	//whether or not it's found, replace the contents with the new message
+	DeferredEdits[dgs.GameStateMsg.MessageID] = me
+	DeferredEditsLock.Unlock()
+}
+
+func deferredEditWorker(s *discordgo.Session, channelID, messageID string) {
+	time.Sleep(time.Second * time.Duration(DeferredEditSeconds))
+
+	DeferredEditsLock.Lock()
+	me := DeferredEdits[messageID]
+	delete(DeferredEdits, messageID)
+	DeferredEditsLock.Unlock()
+
+	if me != nil {
+		editMessageEmbed(s, channelID, messageID, me)
+	}
+}
+
+func (dgs *DiscordGameState) CreateMessage(s *discordgo.Session, me *discordgo.MessageEmbed, channelID string, authorID string) {
+	dgs.GameStateMsg.LeaderID = authorID
+	msg := sendMessageEmbed(s, channelID, me)
+	if msg != nil {
+		dgs.GameStateMsg.MessageAuthorID = msg.Author.ID
+		dgs.GameStateMsg.MessageChannelID = msg.ChannelID
+		dgs.GameStateMsg.MessageID = msg.ID
+	}
+}
+
+func (dgs *DiscordGameState) SameChannel(channelID string) bool {
+	if dgs.GameStateMsg.MessageID != "" {
+		return dgs.GameStateMsg.MessageChannelID == channelID
 	}
 	return false
 }
 
-func (gsm *GameStateMessage) IsReactionTo(m *discordgo.MessageReactionAdd) bool {
-	gsm.lock.RLock()
-	defer gsm.lock.RUnlock()
-	if gsm.message == nil {
+func (dgs *DiscordGameState) IsReactionTo(m *discordgo.MessageReactionAdd) bool {
+	if !dgs.Exists() {
 		return false
 	}
 
-	return m.ChannelID == gsm.message.ChannelID && m.MessageID == gsm.message.ID && m.UserID != gsm.message.Author.ID
+	return m.ChannelID == dgs.GameStateMsg.MessageChannelID && m.MessageID == dgs.GameStateMsg.MessageID && m.UserID != dgs.GameStateMsg.MessageAuthorID
 }
